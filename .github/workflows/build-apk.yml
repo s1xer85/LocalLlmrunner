@@ -25,22 +25,22 @@ jobs:
 
     steps:
 
-      # 1. Download repository
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
+      # 2. Setup Java
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Install Android SDK
+      # 3. Setup Android SDK
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4. Install required Android SDK packages
+      # 4. Install Android SDK packages
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses > /dev/null || true
@@ -50,37 +50,67 @@ jobs:
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-      # 5. Find the Android project
+      # 5. Find Android project automatically
       - name: Detect Android project
         id: project
         shell: bash
         run: |
           set -e
 
-          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-            echo "Android project found at repository root."
+          echo "Repository contents:"
+          find . -maxdepth 5 -type f \
+            \( \
+              -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+            \) \
+            -not -path "./.git/*" \
+            -print
 
-          elif [ -f "nexias-llms/settings.gradle.kts" ] || [ -f "nexias-llms/settings.gradle" ]; then
-            echo "dir=nexias-llms" >> "$GITHUB_OUTPUT"
-            echo "Android project found inside nexias-llms/."
+          echo ""
+          echo "Searching for Android Gradle project..."
 
-          else
-            echo "ERROR: Android Gradle project not found."
+          SETTINGS_FILE=$(find . \
+            -type f \
+            \( \
+              -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+            \) \
+            -not -path "./.git/*" \
+            | head -n 1)
+
+          if [ -z "$SETTINGS_FILE" ]; then
             echo ""
-            echo "Searching for settings.gradle files..."
-
+            echo "ERROR: No settings.gradle or settings.gradle.kts found."
+            echo ""
+            echo "Repository tree:"
             find . -maxdepth 4 -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \)
-
+              -not -path "./.git/*" \
+              | sort
             exit 1
           fi
 
-      # 6. Verify project files
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+
+          if [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+          else
+            PROJECT_DIR="${PROJECT_DIR#./}"
+          fi
+
+          echo ""
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      # 6. Verify Android project
       - name: Verify project
         working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
         run: |
           set -e
+
+          echo "Checking Android project..."
 
           if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
             echo "ERROR: settings.gradle(.kts) not found."
@@ -102,15 +132,22 @@ jobs:
             exit 1
           fi
 
-          echo "Project verification passed."
+          echo ""
+          echo "Project verification successful."
 
-      # 7. Install Gradle 8.7
+      # 7. Setup Gradle
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      # 8. Clean project
+      # 8. Show Gradle information
+      - name: Check Gradle
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          gradle --version
+
+      # 9. Clean project
       - name: Clean project
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
@@ -118,7 +155,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 9. Build APK
+      # 10. Build APK
       - name: Build Debug APK
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
@@ -127,7 +164,7 @@ jobs:
             --stacktrace \
             --warning-mode all
 
-      # 10. Find APK
+      # 11. Find APK
       - name: Find generated APK
         id: apk
         working-directory: ${{ steps.project.outputs.dir }}
@@ -144,18 +181,20 @@ jobs:
             echo "ERROR: APK was not generated."
 
             echo ""
-            echo "Available build output:"
-            find app/build/outputs -type f 2>/dev/null || true
+            echo "Build output:"
+            find app/build/outputs \
+              -type f 2>/dev/null || true
 
             exit 1
           fi
 
+          echo ""
           echo "APK found:"
           echo "$APK"
 
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
-      # 11. Rename and prepare APK
+      # 12. Prepare APK
       - name: Prepare APK
         working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
@@ -171,7 +210,7 @@ jobs:
           echo "Final APK:"
           ls -lh release/Nexias-LLMs-debug.apk
 
-      # 12. Upload APK
+      # 13. Upload APK
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -180,16 +219,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 13. Show build result
+      # 14. Build summary
       - name: Build summary
         if: success()
         run: |
           echo "## ✅ Nexias LLMs APK Build Successful" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**APK:** Nexias-LLMs-debug.apk" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Build type:** Debug" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Build:** Debug" >> "$GITHUB_STEP_SUMMARY"
           echo "**Java:** 17" >> "$GITHUB_STEP_SUMMARY"
           echo "**Gradle:** 8.7" >> "$GITHUB_STEP_SUMMARY"
           echo "**Android SDK:** 34" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Download the APK from the workflow Artifacts section." >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the APK from Artifacts." >> "$GITHUB_STEP_SUMMARY"
