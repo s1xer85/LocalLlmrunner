@@ -1,42 +1,199 @@
-name: Build APK
+name: Nexias LLMs - Build APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
+
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apk-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Build Debug APK
     runs-on: ubuntu-latest
 
     steps:
+      # ─────────────────────────────────────────────
+      # 1. Checkout
+      # ─────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ─────────────────────────────────────────────
+      # 2. Java 17
+      # ─────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
+          cache: gradle
 
+      # ─────────────────────────────────────────────
+      # 3. Android SDK
+      # ─────────────────────────────────────────────
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null || true
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
 
-      - name: Set up Gradle
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # ─────────────────────────────────────────────
+      # 4. Detect Android project
+      # ─────────────────────────────────────────────
+      - name: Detect project directory
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            echo "Android project found at repository root."
+
+          elif [ -f "nexias-llms/settings.gradle.kts" ] || [ -f "nexias-llms/settings.gradle" ]; then
+            echo "dir=nexias-llms" >> "$GITHUB_OUTPUT"
+            echo "Android project found inside nexias-llms/."
+
+          else
+            echo "ERROR: Android Gradle project not found."
+            echo ""
+            echo "Expected settings.gradle or settings.gradle.kts."
+            echo ""
+            find . -maxdepth 3 -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \)
+            exit 1
+          fi
+
+      # ─────────────────────────────────────────────
+      # 5. Show project structure
+      # ─────────────────────────────────────────────
+      - name: Verify project
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          echo "Project directory:"
+          pwd
+
+          echo ""
+          echo "Project files:"
+          ls -la
+
+          echo ""
+          echo "App directory:"
+          ls -la app
+
+          echo ""
+          echo "Gradle files:"
+          find . -maxdepth 3 -type f \
+            \( -name "*.gradle" -o -name "*.gradle.kts" \)
+
+      # ─────────────────────────────────────────────
+      # 6. Set up Gradle
+      # ─────────────────────────────────────────────
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
+          gradle-version: '8.7'
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      # ─────────────────────────────────────────────
+      # 7. Build
+      # ─────────────────────────────────────────────
+      - name: Clean project
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          gradle clean --no-daemon
 
-      - name: Upload debug APK
+      - name: Build Debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          gradle :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      # ─────────────────────────────────────────────
+      # 8. Find APK
+      # ─────────────────────────────────────────────
+      - name: Find generated APK
+        id: apk
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find app/build/outputs/apk/debug \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            echo ""
+            echo "Build output:"
+            find app/build/outputs -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      # ─────────────────────────────────────────────
+      # 9. Rename APK
+      # ─────────────────────────────────────────────
+      - name: Prepare APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          mkdir -p release
+
+          cp "${{ steps.apk.outputs.path }}" \
+            "release/Nexias-LLMs-debug.apk"
+
+          echo "Final APK:"
+          ls -lh release/Nexias-LLMs-debug.apk
+
+      # ─────────────────────────────────────────────
+      # 10. Upload APK
+      # ─────────────────────────────────────────────
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nexias-llms-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: Nexias-LLMs-APK
+          path: ${{ steps.project.outputs.dir }}/release/Nexias-LLMs-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # ─────────────────────────────────────────────
+      # 11. Build summary
+      # ─────────────────────────────────────────────
+      - name: Build summary
+        if: success()
+        run: |
+          echo "## ✅ Nexias LLMs APK Build Successful" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**APK:** Nexias-LLMs-debug.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Build type:** Debug" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Java:** 17" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Gradle:** 8.7" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Android SDK:** 34" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the APK from the workflow **Artifacts** section." >> "$GITHUB_STEP_SUMMARY"
